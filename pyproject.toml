@@ -1,0 +1,17 @@
+# VineFocus 项目元数据与基础开发工具配置。
+
+[project]
+name = "vinefocus"
+version = "1.7.2"
+description = "A cross-platform focus timer with quiet, high-fidelity botanical growth."
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.5,<7",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
