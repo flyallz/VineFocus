@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -34,6 +36,7 @@ def render_overlay(
     path: Path,
     layout_name: str = "侧边攀援",
     flower_count: int = 5,
+    progress: float = 1.0,
 ) -> None:
     overlay = VineOverlay()
     overlay.resize(1600, 900)
@@ -41,7 +44,7 @@ def render_overlay(
     overlay.set_layout(layout_name)
     overlay.set_density(density)
     overlay.set_presentation(44, 62, True)
-    overlay.set_progress(1.0)
+    overlay.set_progress(progress)
     overlay.set_open_flower_count(flower_count)
     image = QImage(1600, 900, QImage.Format.Format_ARGB32_Premultiplied)
     image.fill(QColor(background))
@@ -71,6 +74,32 @@ def render_settings(path: Path) -> None:
     overlay.close()
 
 
+def render_panel(path: Path) -> None:
+    """在隔离设置目录中生成紧凑主面板验收图，不改动用户真实配置。"""
+    with tempfile.TemporaryDirectory() as folder, patch(
+        "vinefocus.state.Path.home", return_value=Path(folder)
+    ):
+        overlay = VineOverlay()
+        overlay.set_progress(4 / 24)
+        overlay.set_open_flower_count(4)
+        panel = PomodoroPanel(overlay)
+        panel.state.data.update({
+            "growth_completed_units": 4,
+            "growth_effective_units": 4,
+        })
+        panel.reset(confirm=False)
+        panel._fit_panel_to_content()
+        QApplication.processEvents()
+        image = QImage(panel.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor("#E8EDF1"))
+        painter = QPainter(image)
+        panel.render(painter, QPoint())
+        painter.end()
+        image.save(str(path))
+        panel.close()
+        overlay.close()
+
+
 def main() -> None:
     app = QApplication.instance() or QApplication([])
     PREVIEWS.mkdir(parents=True, exist_ok=True)
@@ -83,13 +112,24 @@ def main() -> None:
             PREVIEWS / f"VineFocus_v17_{index + 1}_{VINE_THEMES[theme]['profile']}_side.png",
         )
     render_overlay(
-        "月白花藤",
+        "樱雾花枝",
         82,
         "#F4F6F7",
-        PREVIEWS / "VineFocus_v171_perimeter_four_progress_points.png",
+        PREVIEWS / "VineFocus_v173_perimeter_four_rounds.png",
         layout_name="环屏生长",
         flower_count=4,
+        progress=4 / 24,
     )
+    render_overlay(
+        "极光荧藤",
+        74,
+        "#F4F6F7",
+        PREVIEWS / "VineFocus_v173_aurora_perimeter.png",
+        layout_name="环屏生长",
+        flower_count=12,
+        progress=12 / 24,
+    )
+    render_panel(PREVIEWS / "VineFocus_v173_glass_panel.png")
     # 设置页需在 Windows/macOS 真机字体环境截图；offscreen 插件不可靠加载中文字体。
     app.quit()
 

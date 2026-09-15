@@ -67,6 +67,8 @@ class VineOverlay(QWidget):
         self.growth_chapter = 1
         self.completion_glow = 0.0
         self._celebration_started = 0.0
+        self._bloom_transition_started = 0.0
+        self._bloom_transition_from_count = 0
         self._celebration_timer = QTimer(self)
         self._celebration_timer.setInterval(33)
         self._celebration_timer.timeout.connect(self._advance_celebration)
@@ -181,9 +183,18 @@ class VineOverlay(QWidget):
             self._rest_animation_timer.stop()
         self.update()
 
-    def set_open_flower_count(self, count: int):
-        """由业务层提交目标推进次数；渲染层据此表现自然开花阶段。"""
-        self.open_flower_count = max(0, int(count))
+    def set_open_flower_count(self, count: int, *, animate: bool = False):
+        """提交已获得的花簇数；新花簇可从花苞平滑展开，而非瞬间跳出。"""
+        count = max(0, int(count))
+        previous = self.open_flower_count
+        self.open_flower_count = count
+        if animate and count > previous:
+            self._bloom_transition_from_count = previous
+            self._bloom_transition_started = time.monotonic()
+        else:
+            # 恢复历史状态时直接显示成熟花簇，不重复播放旧动画。
+            self._bloom_transition_from_count = count
+            self._bloom_transition_started = 0.0
         self.update()
 
     def set_growth_chapter(self, chapter: int):
@@ -335,9 +346,16 @@ class VineOverlay(QWidget):
         point, angle = self._point_on_gesture(gesture, local_distance)
         inward = self._inward_side(point, angle)
         side = inward if force_inward or rng.random() < inward_bias else -inward
+        gesture_index = self.gestures.index(gesture)
+        # 环屏的四条断续路径共享同一条 0~100% 成长时间轴。节点仍保存真实
+        # 屏幕坐标，但 distance 表示“何时长到这里”，不再表示四段串接距离。
+        if self.layout_name == "环屏生长":
+            growth_distance = self.total_length * local_distance / max(1.0, gesture.length)
+        else:
+            growth_distance = gesture.offset + local_distance
         return VineNode(
             point=point,
-            distance=gesture.offset + local_distance,
+            distance=growth_distance,
             angle=angle,
             side=side,
             scale=rng.uniform(*scale),
@@ -345,6 +363,8 @@ class VineOverlay(QWidget):
             phase=rng.random(),
             reach=rng.uniform(*reach),
             bend=rng.uniform(-16.0, 16.0),
+            gesture_index=gesture_index,
+            local_distance=local_distance,
         )
 
     def build_nodes(self, spacing: int, start_offset: int) -> List[VineNode]:
@@ -376,11 +396,18 @@ class VineOverlay(QWidget):
                 self.leaf_nodes.append(
                     self._make_node(
                         gesture, distance, rng,
-                        scale=(0.72, 1.16), reach=(4.0, 12.0), inward_bias=0.66,
+                        scale=(0.72, 1.16), reach=(4.0, 12.0),
+                        force_inward=self.profile == "glow", inward_bias=0.66,
                     )
                 )
-                pair_probability = 0.14 if self.profile == "ivy" else 0.0
-                pair_probability += max(0.0, (self.density_value - 25) / 75.0) * 0.60
+                # 极光心形叶从顶部凹口连接；同锚点反向复制会形成明显重叠，
+                # 因此由侧枝端叶提供丰满度，不再生成共用锚点的成对直属叶。
+                pair_probability = (
+                    0.0 if self.profile == "glow"
+                    else (0.14 if self.profile == "ivy" else 0.0)
+                )
+                if self.profile != "glow":
+                    pair_probability += max(0.0, (self.density_value - 25) / 75.0) * 0.60
                 if rng.random() < pair_probability:
                     pair = self._make_node(gesture, distance + 0.01, rng, scale=(0.54, 0.82), reach=(3.0, 7.0))
                     pair.side *= -1
@@ -412,12 +439,16 @@ class VineOverlay(QWidget):
         # 花位采用有节奏的固定比例，而不是依赖超大随机间距。目标有推进时，
         # 用户可以持续看到开花阶段前进；密度只改变可用花位数量，不放大花朵。
         base_slots = {
-            "静谧单株": 3 if self.profile == "wisteria" else 6,
-            "侧边攀援": 6 if self.profile == "wisteria" else 8,
-            "环屏生长": 8 if self.profile == "wisteria" else 12,
+            "静谧单株": 4 if self.profile == "wisteria" else 8,
+            "侧边攀援": 8 if self.profile == "wisteria" else 12,
+            "环屏生长": 12 if self.profile == "wisteria" else 24,
         }[self.layout_name]
         slot_multiplier = 0.75 + self.density_value / 200.0
-        desired_slots = max(2, int(round(base_slots * slot_multiplier)))
+        chapter_slot_limit = 16 if self.profile == "wisteria" else 24
+        desired_slots = min(
+            chapter_slot_limit,
+            max(2, int(round(base_slots * slot_multiplier))),
+        )
         gesture_counts = [desired_slots // len(self.gestures)] * len(self.gestures)
         for index in range(desired_slots % len(self.gestures)):
             gesture_counts[index] += 1
@@ -426,12 +457,23 @@ class VineOverlay(QWidget):
             gesture = self.gestures[gesture_index]
             group: list[VineNode] = []
             for slot in range(slot_count):
-                fraction = 0.16 + 0.76 * ((slot + 1) / (slot_count + 1))
-                fraction += rng.uniform(-0.022, 0.022)
+                # 每段的第一个花位靠近早期已成熟区域，确保前几轮就能跨区域
+                # 看见开花；后续花位仍留有充分间隔，避免一开始就过度茂盛。
+                if self.layout_name == "环屏生长":
+                    # 每四次有效进展完成一个环屏轮转。第一组靠近四段起点，
+                    # 因而第一轮就能看见；后续组随 24 轮成长阈值向前推进。
+                    fraction = 0.018 + slot * len(self.gestures) / 24.0 * 0.96
+                    fraction += rng.uniform(-0.006, 0.006)
+                else:
+                    fraction = (
+                        0.018 if slot == 0
+                        else 0.018 + 0.82 * (slot / max(1, slot_count - 1)) ** 1.45
+                    )
+                    fraction += rng.uniform(-0.018, 0.018)
                 variant = (slot + gesture_index) % 3
                 node = self._make_node(
                     gesture,
-                    gesture.length * self.clamp(fraction, 0.14, 0.93),
+                    gesture.length * self.clamp(fraction, 0.012, 0.93),
                     rng,
                     scale=(0.86, 1.08) if self.profile == "wisteria" else (0.76, 1.08),
                     reach=(6.0, 14.0) if self.profile == "wisteria" else (12.0, 24.0),
@@ -446,14 +488,10 @@ class VineOverlay(QWidget):
 
         # 环屏时交替选择相距最远的路径段，形成不对称但均衡的开花节奏：
         # 第一处、对角处、另一侧、最后一侧，而不是先把左上角全部开满。
-        gesture_order = []
-        left, right = 0, len(flower_groups) - 1
-        while left <= right:
-            gesture_order.append(left)
-            if right != left:
-                gesture_order.append(right)
-            left += 1
-            right -= 1
+        # 每株使用稳定随机顺序选择区域：看起来有生命感，但重绘、暂停和重启
+        # 都不会换位置。一个轮转周期内每段只出现一次，保证跨区域分散。
+        gesture_order = list(range(len(flower_groups)))
+        rng.shuffle(gesture_order)
         unlock_order: list[VineNode] = []
         max_slots = max((len(group) for group in flower_groups), default=0)
         for slot in range(max_slots):
@@ -466,11 +504,15 @@ class VineOverlay(QWidget):
 
         # 花苞、花位和分枝根部都需要干净的关节空间。去掉距离过近的直属叶片，
         # 避免多个透明组件叠成“叶片团”，分枝自己的端叶会在下一绘制层补回。
-        reserved = [node.distance for node in self.branch_nodes + self.bud_nodes + self.flower_nodes]
-        clearance = 17.0 if self.layout_name == "环屏生长" else 20.0
+        reserved = self.branch_nodes + self.bud_nodes + self.flower_nodes
+        clearance = 30.0 if self.profile == "glow" else (17.0 if self.layout_name == "环屏生长" else 20.0)
         self.leaf_nodes = [
             node for node in self.leaf_nodes
-            if all(abs(node.distance - distance) >= clearance for distance in reserved)
+            if all(
+                node.gesture_index != other.gesture_index
+                or abs(node.local_distance - other.local_distance) >= clearance
+                for other in reserved
+            )
         ]
 
         for collection in (self.leaf_nodes, self.branch_nodes, self.tendril_nodes, self.bud_nodes, self.flower_nodes):
@@ -502,17 +544,24 @@ class VineOverlay(QWidget):
             min(self.width() / 1920.0, self.height() / 1080.0), 0.90, 1.35
         )
 
+    def _gesture_visible_length(self, gesture: VineGesture, grown_length: float) -> float:
+        """返回单段路径的可见长度；环屏四段共享同一成长进度。"""
+        if self.layout_name == "环屏生长":
+            return gesture.length * self.progress
+        return self.clamp(
+            (grown_length - gesture.offset) / max(1.0, gesture.length)
+        ) * gesture.length
+
     def draw_main_vines(self, painter: QPainter, grown_length: float, textured: bool = False):
         """绘制连续主藤；细分器官模式下只保留克制的连接骨架。"""
         resolution_scale = self._resolution_scale()
         base_width = PROFILE_METRICS[self.profile]["base_width"] * resolution_scale
         for gesture in self.gestures:
-            visible = grown_length - gesture.offset
+            visible = self._gesture_visible_length(gesture, grown_length)
             if visible <= 0.0:
                 continue
-            visible = min(gesture.length, visible)
             path = self._path_until(gesture, visible)
-            mature = self.clamp((gesture.offset + visible) / max(1.0, self.total_length))
+            mature = self.clamp(visible / max(1.0, gesture.length))
             width = base_width * (1.08 - 0.22 * mature)
 
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -724,40 +773,64 @@ class VineOverlay(QWidget):
                 opacity=0.48 + age * 0.50, mirror=node.side < 0,
             )
 
-        # 预留花位同样从花苞开始；目标推进驱动开花阶段，具体朵数由植物习性决定。
+        # 花位只在获得时出现，并从花苞舒展；具体朵数由植物习性决定。
         flower_names = ("bud_closed", "bud_swollen", "bloom_half", "bloom_open")
         for index, node in enumerate(self.flower_nodes):
             if node.distance > grown_length:
                 break
             age = self._organ_age(grown_length, node, 28.0, 138.0)
+            is_effective = node.unlock_rank < self.open_flower_count
+            # 未获得的花位不是“欠用户的花苞”，因此不常驻显示。真正的普通
+            # 花苞由 bud_nodes 承担；目标推进后，此处才从孕蕾自然过渡到盛开。
+            if not is_effective:
+                continue
+            # 已获得的历史花簇保持盛开；刚提交的花簇在庆祝动画的 1.2 秒内
+            # 依次从花苞舒展。这样“目标有推进”的反馈既立即可见，又不突兀。
+            earned_age = 1.0
+            if (
+                self._bloom_transition_started > 0.0
+                and node.unlock_rank >= self._bloom_transition_from_count
+            ):
+                elapsed = time.monotonic() - self._bloom_transition_started
+                earned_age = self._smoothstep(elapsed / 1.2)
+            age = max(age, earned_age)
             if age <= 0.015:
                 continue
-            is_effective = node.unlock_rank < self.open_flower_count
             if self.profile == "wisteria":
                 cluster_plan = ((0.0, 1.0, 0.0),)
                 base_height = (16.0 + 53.0 * age) * node.scale
             elif self.profile == "cherry":
-                cluster_plan = ((0.0, 1.0, 0.0), (-31.0, 0.74, 0.06), (27.0, 0.67, 0.11), (51.0, 0.50, 0.17))
+                cluster_plan = (
+                    (0.0, 1.0, 0.0),
+                    (-31.0, 0.74, 0.06),
+                    (27.0, 0.67, 0.11),
+                    (51.0, 0.50, 0.17),
+                )
                 base_height = (11.0 + 33.0 * age) * node.scale
             elif self.profile == "glow":
-                cluster_plan = ((0.0, 1.0, 0.0), (-29.0, 0.62, 0.08), (32.0, 0.54, 0.14))
+                cluster_plan = (
+                    (0.0, 1.0, 0.0),
+                    (-29.0, 0.62, 0.08),
+                    (32.0, 0.54, 0.14),
+                )
                 base_height = (11.0 + 33.0 * age) * node.scale
             else:
-                cluster_plan = ((0.0, 1.0, 0.0), (-27.0, 0.72, 0.07), (30.0, 0.63, 0.14))
+                cluster_plan = (
+                    (0.0, 1.0, 0.0),
+                    (-27.0, 0.72, 0.07),
+                    (30.0, 0.63, 0.14),
+                )
                 base_height = (11.0 + 33.0 * age) * node.scale
 
-            # 孕蕾阶段只保留一个花苞；开花后由同一真实根部向外自然展开，
-            # 不会出现漂浮花朵。超过可用花位的成果只轻微提高丰满度。
-            members = cluster_plan if is_effective else cluster_plan[:1]
+            # 组合成员共享同一真实根部并以小延迟逐个舒展，不会出现漂浮花。
+            # 超过可用花位的成果只轻微提高丰满度，避免遮挡中央工作区。
+            members = cluster_plan
             surplus = max(0, self.open_flower_count - len(self.flower_nodes))
             fullness = 1.0 + min(0.10, surplus * 0.012)
             base_direction = self._organ_direction(node, 57.0)
             for member_index, (angle_offset, scale, delay) in enumerate(members):
                 member_age = self.clamp((age - delay) / max(0.01, 1.0 - delay))
-                stage = (
-                    min(3, int(member_age * 4.0))
-                    if is_effective else min(1, int(member_age * 3.0))
-                )
+                stage = min(3, int(member_age * 4.0))
                 organ = flower_names[stage]
                 full_bloom = is_effective and stage == 3
                 breathing = 1.0
@@ -766,8 +839,8 @@ class VineOverlay(QWidget):
                     wave = math.sin(
                         self.rest_wave * 1.45 + node.phase * math.tau + member_index * 0.8
                     )
-                    breathing += (0.042 if self.rest_mode else 0.006) * wave
-                    breath_alpha += (0.08 if self.rest_mode else 0.01) * wave
+                    breathing += (0.055 if self.rest_mode else 0.006) * wave
+                    breath_alpha += (0.10 if self.rest_mode else 0.01) * wave
                 BotanicalAssets.draw_organ(
                     painter, theme, organ, node.point,
                     base_direction + node.side * angle_offset,
@@ -780,17 +853,25 @@ class VineOverlay(QWidget):
         """用两片嫩叶形成真实生长尖端，避免回落到矢量图标画风。"""
         if self.rest_mode or grown_length <= 4.0 or grown_length >= self.total_length - 1.0:
             return
-        point, angle = self.point_at_distance(grown_length)
         resolution_scale = self._resolution_scale()
         size = 28.0 * resolution_scale
-        BotanicalAssets.draw_organ(
-            painter, self.theme_name, "leaf_tiny", point,
-            angle - 28.0, size, opacity=0.88,
-        )
-        BotanicalAssets.draw_organ(
-            painter, self.theme_name, "leaf_tiny", point,
-            angle + 30.0, size * 0.78, opacity=0.78, mirror=True,
-        )
+        tips = []
+        if self.layout_name == "环屏生长":
+            for gesture in self.gestures:
+                visible = self._gesture_visible_length(gesture, grown_length)
+                if 4.0 < visible < gesture.length - 1.0:
+                    tips.append(self._point_on_gesture(gesture, visible))
+        else:
+            tips.append(self.point_at_distance(grown_length))
+        for point, angle in tips:
+            BotanicalAssets.draw_organ(
+                painter, self.theme_name, "leaf_tiny", point,
+                angle - 28.0, size, opacity=0.88,
+            )
+            BotanicalAssets.draw_organ(
+                painter, self.theme_name, "leaf_tiny", point,
+                angle + 30.0, size * 0.78, opacity=0.78, mirror=True,
+            )
 
     def draw_terminal_caps(
         self,
@@ -802,7 +883,7 @@ class VineOverlay(QWidget):
         resolution_scale = self._resolution_scale()
         density_size = 1.0
         for gesture in self.gestures:
-            visible = grown_length - gesture.offset
+            visible = self._gesture_visible_length(gesture, grown_length)
             if visible < gesture.length - 0.6:
                 continue
             point, angle = self._point_on_gesture(gesture, gesture.length)
@@ -1275,8 +1356,6 @@ class VineOverlay(QWidget):
                 local = self.clamp((grown_length - node.distance) / 150.0)
                 if node.unlock_rank < self.open_flower_count:
                     self.draw_wisteria_cluster(painter, node, local, int(58 + 168 * local), index)
-                else:
-                    self.draw_bud(painter, node, 0.54 * density_scale, int(42 + 142 * local), local)
         elif self.progress >= 0.34:
             for index, node in enumerate(self.flower_nodes):
                 if node.distance > grown_length:
@@ -1290,14 +1369,6 @@ class VineOverlay(QWidget):
                         int(55 + 164 * local),
                         local,
                         index,
-                    )
-                else:
-                    self.draw_bud(
-                        painter,
-                        node,
-                        (0.30 + 0.52 * local) * density_scale,
-                        int(42 + 152 * local),
-                        local,
                     )
 
         self.draw_growing_tip(painter, grown_length)
@@ -1313,6 +1384,7 @@ class VineOverlay(QWidget):
             asset_placements,
             self.open_flower_count,
             pulse,
+            progress=self.progress,
         )
         painter.restore()
 

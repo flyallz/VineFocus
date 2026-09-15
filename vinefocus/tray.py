@@ -12,15 +12,19 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
 from .panel import PomodoroPanel
+from .styles import build_menu_qss
 
 class TrayController:
     def __init__(self, panel: PomodoroPanel):
         self.panel = panel
-        self.panel.set_tray_controller(self)
         self.tray = QSystemTrayIcon(panel)
         self.tray.setIcon(self.create_icon())
         self.tray.setToolTip("花藤专注")
-        self.menu = QMenu(panel)
+        # 菜单不挂在主面板 QWidget 样式树下；否则浅色系统菜单会继承面板的
+        # 浅色文字，形成截图中的“白底白字”。Windows/Linux 使用明确主题，
+        # macOS 则保留原生菜单外观。
+        self.menu = QMenu()
+        self.panel.set_tray_controller(self)
 
         self.show_panel_action = QAction("显示控制面板", self.menu)
         self.show_panel_action.triggered.connect(self.panel.show_panel)
@@ -59,11 +63,16 @@ class TrayController:
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.menu.aboutToShow.connect(self.update_action_states)
+        self.apply_theme(self.panel.ui_theme_combo.currentText())
         self.tray.show()
         self.status_timer = QTimer(self.tray)
         self.status_timer.setInterval(1000)
         self.status_timer.timeout.connect(self.update_status_text)
         self.status_timer.start()
+
+    def apply_theme(self, theme_name: str):
+        """让托盘菜单与主面板主题同步，同时保留 macOS 原生菜单。"""
+        self.menu.setStyleSheet("" if sys.platform == "darwin" else build_menu_qss(theme_name))
 
     def create_icon(self) -> QIcon:
         pixmap = QPixmap(64, 64)

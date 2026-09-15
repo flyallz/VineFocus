@@ -2,7 +2,7 @@
 
 [project]
 name = "vinefocus"
-version = "1.7.2"
+version = "1.7.3"
 description = "A cross-platform focus timer with quiet, high-fidelity botanical growth."
 requires-python = ">=3.10"
 dependencies = [

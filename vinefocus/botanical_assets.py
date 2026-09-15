@@ -331,6 +331,7 @@ class BotanicalAssets:
         placements: list[PlantPlacement],
         count: int,
         pulse: float = 0.0,
+        progress: float = 1.0,
     ) -> None:
         atlas = cls.flower_atlas()
         if atlas.isNull() or not placements or count <= 0:
@@ -342,17 +343,21 @@ class BotanicalAssets:
         # 小型预览只有一个 placement，也要能表达初花到盛花，而不是永远只画
         # 一两处；桌面兼容模式仍按构图数量限制上限，避免花朵淹没枝叶。
         capacity = max(4, len(placements) * 2) if theme_name != "流苏紫藤" else max(2, len(placements))
-        max_flowers = min(count, capacity)
+        progress = max(0.0, min(1.0, progress))
+        candidates = []
+        for placement in placements:
+            for anchor_index, (raw_x, raw_y) in enumerate(anchors):
+                ax = 1.0 - raw_x if placement.mirror_x else raw_x
+                ay = 1.0 - raw_y if placement.mirror_y else raw_y
+                visible = ay <= progress + 0.025 if placement.grow_from_top else ay >= 1.0 - progress - 0.025
+                if visible:
+                    candidates.append((placement, ax, ay, anchor_index))
+        max_flowers = min(count, capacity, len(candidates))
         for index in range(max_flowers):
-            placement = placements[index % len(placements)]
-            ax, ay = anchors[index % len(anchors)]
-            if placement.mirror_x:
-                ax = 1.0 - ax
-            if placement.mirror_y:
-                ay = 1.0 - ay
+            placement, ax, ay, anchor_index = candidates[index]
             center_x = placement.rect.left() + placement.rect.width() * ax
             center_y = placement.rect.top() + placement.rect.height() * ay
-            breathing = 1.0 + 0.025 * math.sin(pulse + index * 1.7)
+            breathing = 1.0 + 0.025 * math.sin(pulse + anchor_index * 1.7)
             if theme_name == "流苏紫藤":
                 width = placement.rect.width() * 0.18 * breathing
                 height = width * 1.62
@@ -432,5 +437,6 @@ class BotanicalPreview(QWidget):
         painter.setOpacity(self.visual_opacity)
         BotanicalAssets._draw_mirrored(painter, pixmap, target, source, False, False)
         BotanicalAssets.draw_open_flowers(
-            painter, self.theme_name, [placement], self.flower_count, pulse=0.0
+            painter, self.theme_name, [placement], self.flower_count, pulse=0.0,
+            progress=progress,
         )

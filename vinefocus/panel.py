@@ -395,6 +395,7 @@ class PomodoroPanel(QWidget):
         self.setStyleSheet(build_app_qss())
         self.setMinimumWidth(430)
         self.resize(468, 540)
+        QTimer.singleShot(0, self._fit_panel_to_content)
         QTimer.singleShot(0, self._position_visual_accents)
 
     def _apply_glass_depth(self):
@@ -425,10 +426,29 @@ class PomodoroPanel(QWidget):
         if not hasattr(self, "focus_botanical"):
             return
         theme_name = self.theme_combo.currentText() if hasattr(self, "theme_combo") else "月白花藤"
-        progress = max(0.55, float(self.overlay.progress))
-        flowers = min(4, int(self.overlay.open_flower_count))
+        # 卡片预览必须忠实反映桌面花藤，不能用最低成熟度掩盖一轮成长。
+        progress = max(0.0, min(1.0, float(self.overlay.progress)))
+        flowers = max(0, int(self.overlay.open_flower_count))
         self.focus_botanical.set_visual(theme_name, progress, flowers)
-        self.growth_botanical.set_visual(theme_name, max(0.68, progress), flowers)
+        self.growth_botanical.set_visual(theme_name, progress, flowers)
+
+    def _fit_panel_to_content(self):
+        """让主面板高度始终跟随可见内容，避免恢复后留下大块空白。"""
+        if not hasattr(self, "container"):
+            return
+        layout = self.container.layout()
+        if layout is not None:
+            layout.activate()
+        target_height = max(1, self.container.sizeHint().height())
+        old_bottom = self.y() + self.height()
+        self.setMinimumHeight(target_height)
+        self.setMaximumHeight(target_height)
+        if self.height() != target_height:
+            self.resize(self.width(), target_height)
+            if self.isVisible():
+                self.move(self.x(), old_bottom - target_height)
+        if self.isVisible():
+            self.ensure_window_visible()
 
     def toggle_settings_frame(self):
         self.settings_dialog.show_for_parent()
@@ -587,9 +607,7 @@ class PomodoroPanel(QWidget):
         visible = not self.task_editor.isVisible()
         self.task_editor.setVisible(visible)
         self.task_edit_btn.setText("收起" if visible else "编辑")
-        target_height = self.height() + (170 if visible else -170)
-        self.resize(self.width(), min(760, target_height) if visible else max(540, target_height))
-        self.ensure_window_visible()
+        QTimer.singleShot(0, self._fit_panel_to_content)
 
     def refresh_task_summary(self):
         if not hasattr(self, "task_summary_title"):
@@ -785,9 +803,11 @@ class PomodoroPanel(QWidget):
         self.showNormal()
         self.ensure_window_visible()
         self.show()
+        self._fit_panel_to_content()
         self.raise_()
         self.activateWindow()
         QTimer.singleShot(0, self.activate_after_restore)
+        QTimer.singleShot(0, self._fit_panel_to_content)
         QTimer.singleShot(80, self.activate_after_restore)
 
     def hide_panel_only(self):
@@ -847,6 +867,8 @@ class PomodoroPanel(QWidget):
 
     def set_tray_controller(self, controller):
         self.tray_controller = controller
+        if hasattr(controller, "apply_theme"):
+            controller.apply_theme(self.ui_theme_combo.currentText())
 
     def notify_completion(self, title: str, message: str):
         panel_is_foreground = self.display_mode == "panel" and self.isVisible() and self.isActiveWindow()
@@ -937,6 +959,8 @@ class PomodoroPanel(QWidget):
         self.toast.apply_theme(theme_name)
         if self.mini_button:
             self.mini_button.apply_theme(theme_name)
+        if self.tray_controller is not None:
+            self.tray_controller.apply_theme(theme_name)
 
     def change_ui_theme(self, *args):
         self.apply_ui_theme()
@@ -969,10 +993,14 @@ class PomodoroPanel(QWidget):
             self.reset(confirm=False)
         if not self.running:
             if self.phase == "focus" and self.is_cumulative_growth():
-                completed, effective_units, _ = self.state.growth_state()
+                completed, effective_units, chapter = self.state.growth_state()
                 if completed >= 24:
+                    completed, effective_units, chapter = self.state.begin_next_growth_chapter()
+                    self.overlay.set_growth_chapter(chapter)
                     self.overlay.set_progress(0.0)
                     self.overlay.set_open_flower_count(0)
+                    self.refresh_today_label()
+                    self.sync_botanical_previews()
                 else:
                     self.overlay.set_open_flower_count(effective_units)
             self.save_current_settings()
@@ -1070,6 +1098,7 @@ class PomodoroPanel(QWidget):
         else:
             self.overlay.set_progress(0.0)
             self.overlay.set_open_flower_count(0)
+        self.sync_botanical_previews()
         self.status_label.setText("准备开始：选择场景、任务和本轮目标")
         self.start_btn.setText("开始")
         self.refresh_today_label()
@@ -1139,6 +1168,7 @@ class PomodoroPanel(QWidget):
         self.overlay.set_progress(
             self.visual_progress_for_focus(progress) if self.phase == "focus" else self.rest_visual_progress
         )
+        self.sync_botanical_previews()
         self.refresh_labels()
 
     def demo(self):
@@ -1211,10 +1241,11 @@ class PomodoroPanel(QWidget):
         self.refresh_today_label()
         if self.is_cumulative_growth():
             self.overlay.set_progress(min(1.0, completed_units / 24.0))
-            self.overlay.set_open_flower_count(effective_units)
+            self.overlay.set_open_flower_count(effective_units, animate=effective)
         else:
             self.overlay.set_progress(1.0 if effective else 0.70)
-            self.overlay.set_open_flower_count(1 if effective else 0)
+            self.overlay.set_open_flower_count(1 if effective else 0, animate=effective)
+        self.sync_botanical_previews()
         if effective:
             self.overlay.celebrate()
         return effective
@@ -1300,6 +1331,7 @@ class PomodoroPanel(QWidget):
             self.overlay.set_progress(self.rest_visual_progress)
             self.overlay.set_rest_mode(True)
             self.overlay.set_rest_wave(time.monotonic())
+        self.sync_botanical_previews()
         self.refresh_labels()
         if progress >= 1.0:
             self.complete_phase()

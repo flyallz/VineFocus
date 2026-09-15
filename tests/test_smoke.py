@@ -1,10 +1,11 @@
-"""VineFocus v1.7.2 用户优先生长版的无界面冒烟测试。
+"""VineFocus v1.7.3 用户优先生长版的无界面冒烟测试。
 
 覆盖三种构图、稳定节点、有效产出开花，以及主面板/迷你窗/托盘的状态切换。
 """
 
 import os
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -75,14 +76,12 @@ class VineFocusSmokeTests(unittest.TestCase):
         self.overlay.resize(3891, 1967)
         self.overlay.set_layout("环屏生长")
         self.assertAlmostEqual(self.overlay._resolution_scale(), 1.35)
-        reserved = [
-            node.distance for node in
-            self.overlay.branch_nodes + self.overlay.bud_nodes + self.overlay.flower_nodes
-        ]
+        reserved = self.overlay.branch_nodes + self.overlay.bud_nodes + self.overlay.flower_nodes
         self.assertTrue(all(
-            abs(leaf.distance - distance) >= 17.0
+            leaf.gesture_index != other.gesture_index
+            or abs(leaf.local_distance - other.local_distance) >= 17.0
             for leaf in self.overlay.leaf_nodes
-            for distance in reserved
+            for other in reserved
         ))
 
     def test_density_tiers_have_distinct_node_counts(self):
@@ -243,6 +242,27 @@ class VineFocusSmokeTests(unittest.TestCase):
         completed, flowers, chapter = self.panel.state.commit_growth(True)
         self.assertEqual((completed, flowers, chapter), (2, 1, 1))
 
+    def test_focus_only_result_visibly_grows_without_opening_flowers(self):
+        """“只是保持专注”走完整保存流程后，主藤和两处预览都前进 1/24。"""
+        result = {
+            "effective": False,
+            "output": "完成了一轮阅读",
+            "notes": "",
+            "next_step": "继续阅读",
+            "metric_name": "成果数据",
+            "metric_unit": "",
+            "metric_value": 0,
+        }
+        with patch.object(OutputDialog, "exec", return_value=0), patch.object(
+            OutputDialog, "get_result_data", return_value=result
+        ):
+            self.assertFalse(self.panel.capture_output_after_focus())
+        self.assertEqual(self.panel.state.growth_state(), (1, 0, 1))
+        self.assertAlmostEqual(self.overlay.progress, 1 / 24)
+        self.assertEqual(self.overlay.open_flower_count, 0)
+        self.assertAlmostEqual(self.panel.focus_botanical.progress, 1 / 24)
+        self.assertAlmostEqual(self.panel.growth_botanical.progress, 1 / 24)
+
     def test_growth_stage_uses_plain_language(self):
         stage = self.panel.state.growth_stage_name
         self.assertEqual(stage(0, 0), "萌芽")
@@ -256,14 +276,128 @@ class VineFocusSmokeTests(unittest.TestCase):
         self.overlay.resize(1920, 1080)
         self.overlay.set_layout("环屏生长")
         ranked = sorted(self.overlay.flower_nodes, key=lambda node: node.unlock_rank)[:4]
-        gesture_indexes = []
-        for node in ranked:
-            index = next(
-                i for i, gesture in enumerate(self.overlay.gestures)
-                if gesture.offset <= node.distance <= gesture.offset + gesture.length
-            )
-            gesture_indexes.append(index)
+        gesture_indexes = [node.gesture_index for node in ranked]
         self.assertEqual(len(set(gesture_indexes)), 4)
+
+        # 四轮均有推进时，四处花簇必须都位于已长成范围内，不能只在数据上解锁。
+        grown_length = self.overlay.total_length * (4 / 24)
+        visible = [node for node in ranked if node.distance <= grown_length]
+        self.assertEqual(len(visible), 4)
+
+    def test_first_effective_round_has_a_visible_bloom_group(self):
+        """第一轮有效推进结束后就有可见花簇，不必等到第三、四轮。"""
+        self.overlay.resize(1920, 1080)
+        self.overlay.set_layout("环屏生长")
+        for theme_name in VINE_THEMES:
+            self.overlay.set_theme(theme_name)
+            first = min(self.overlay.flower_nodes, key=lambda node: node.unlock_rank)
+            self.assertLessEqual(first.distance, self.overlay.total_length / 24, theme_name)
+
+    def test_four_bloom_events_change_pixels_in_all_four_screen_regions(self):
+        """验证最终合成结果，而不只验证内部节点：四角都必须真的画出花。"""
+        self.overlay.resize(960, 540)
+        self.overlay.set_layout("环屏生长")
+        self.overlay.set_theme("樱雾花枝")
+        self.overlay.set_presentation(44, 62, True)
+        self.overlay.set_progress(4 / 24)
+
+        def render(flower_count):
+            self.overlay.set_open_flower_count(flower_count)
+            image = QImage(960, 540, QImage.Format.Format_ARGB32_Premultiplied)
+            image.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(image)
+            self.overlay.render(painter, QPoint())
+            painter.end()
+            return image
+
+        without_flowers = render(0)
+        with_flowers = render(4)
+        changed = [0, 0, 0, 0]
+        for y in range(540):
+            for x in range(960):
+                if without_flowers.pixel(x, y) != with_flowers.pixel(x, y):
+                    changed[(2 if y >= 270 else 0) + (1 if x >= 480 else 0)] += 1
+        self.assertTrue(all(pixel_count > 20 for pixel_count in changed), changed)
+
+    def test_aurora_leaves_face_inward_without_duplicate_anchors(self):
+        """极光心形叶朝向内容区，同一根茎不再叠放一对共锚叶片。"""
+        self.overlay.resize(1920, 1080)
+        self.overlay.set_layout("环屏生长")
+        self.overlay.set_theme("极光荧藤")
+        for node in self.overlay.leaf_nodes:
+            self.assertEqual(node.side, self.overlay._inward_side(node.point, node.angle))
+        for index, first in enumerate(self.overlay.leaf_nodes):
+            for second in self.overlay.leaf_nodes[index + 1:]:
+                if first.gesture_index == second.gesture_index:
+                    self.assertGreater(abs(first.local_distance - second.local_distance), 0.5)
+
+    def test_tray_menu_has_explicit_contrasting_theme(self):
+        """托盘菜单始终同时声明前景和背景，杜绝系统浅色菜单白底白字。"""
+        dark_qss = self.tray.menu.styleSheet()
+        self.assertIn("QMenu", dark_qss)
+        self.assertIn("color: #EAF0F4", dark_qss)
+        self.assertIn("background: rgba(6, 14, 25, 238)", dark_qss)
+        self.panel.ui_theme_combo.setCurrentText("温室晨雾")
+        self.app.processEvents()
+        light_qss = self.tray.menu.styleSheet()
+        self.assertIn("color: #294637", light_qss)
+        self.assertIn("background: rgba(239, 244, 235, 250)", light_qss)
+
+    def test_panel_height_follows_content_and_previews_match_growth(self):
+        """主面板不保留大片空白，小植物也不再伪装成至少半成熟。"""
+        self.panel.show_panel()
+        self.app.processEvents()
+        self.panel._fit_panel_to_content()
+        self.assertEqual(self.panel.height(), self.panel.container.sizeHint().height())
+        self.assertLess(self.panel.height(), 700)
+        collapsed_height = self.panel.height()
+        self.panel.toggle_task_editor()
+        self.app.processEvents()
+        self.assertGreater(self.panel.height(), collapsed_height)
+        self.assertEqual(self.panel.height(), self.panel.container.sizeHint().height())
+        self.panel.toggle_task_editor()
+        self.app.processEvents()
+        self.assertEqual(self.panel.height(), collapsed_height)
+
+        self.overlay.set_progress(1 / 24)
+        self.overlay.set_open_flower_count(0)
+        self.panel.sync_botanical_previews()
+        self.assertAlmostEqual(self.panel.focus_botanical.progress, 1 / 24)
+        self.assertAlmostEqual(self.panel.growth_botanical.progress, 1 / 24)
+        self.assertEqual(self.panel.focus_botanical.flower_count, 0)
+
+    def test_new_plant_seed_is_selected_before_its_first_timer_starts(self):
+        """满 24 轮后的下一株先换种子再计时，提交时不会突然跳形。"""
+        self.panel.state.data.update({
+            "growth_completed_units": 24,
+            "growth_effective_units": 9,
+            "growth_chapter": 1,
+        })
+        self.panel.reset(confirm=False)
+        self.assertEqual(self.overlay.growth_chapter, 1)
+        self.panel.start()
+        self.assertEqual(self.panel.state.growth_state(), (0, 0, 2))
+        self.assertEqual(self.overlay.growth_chapter, 2)
+        self.assertEqual(self.overlay.progress, 0.0)
+        self.assertEqual(self.overlay.open_flower_count, 0)
+        self.panel.pause()
+
+    def test_pause_freezes_the_exact_visual_growth_state(self):
+        """暂停后即使刷新界面，也不能让主藤或卡片预览偷偷向前生长。"""
+        self.panel.state.data["growth_completed_units"] = 4
+        self.panel.reset(confirm=False)
+        self.panel.start()
+        now = time.monotonic()
+        self.panel.start_time = now - 15.0
+        self.panel.last_tick_monotonic = now
+        self.panel.update_timer()
+        self.panel.pause()
+        frozen = self.overlay.progress
+        preview_frozen = self.panel.focus_botanical.progress
+        self.panel.update_timer()
+        self.app.processEvents()
+        self.assertAlmostEqual(self.overlay.progress, frozen)
+        self.assertAlmostEqual(self.panel.focus_botanical.progress, preview_frozen)
 
     def test_output_metric_is_optional_and_hidden_by_default(self):
         dialog = OutputDialog("自定义", "自定义任务", "完成当前步骤")

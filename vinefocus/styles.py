@@ -223,3 +223,35 @@ QProgressBar::chunk {{ background: {token['accent']}; border-radius: 5px; }}
 
 
 APP_QSS = build_app_qss()
+
+
+def build_menu_qss(theme_name: str = "夜色流光") -> str:
+    """返回独立托盘菜单样式，避免菜单继承窗口文字色后变成白底白字。"""
+    token = THEME_TOKENS.get(theme_name, THEME_TOKENS["夜色流光"])
+    return f"""
+QMenu {{
+    color: {token['text']};
+    background: {token['shell_bottom']};
+    border: 1px solid {token['border_focus']};
+    border-radius: 10px;
+    padding: 7px;
+    font-family: "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    font-size: 13px;
+}}
+QMenu::item {{
+    min-width: 164px;
+    min-height: 30px;
+    padding: 3px 14px;
+    border-radius: 7px;
+}}
+QMenu::item:selected {{
+    color: {token['text']};
+    background: {token['accent_soft']};
+}}
+QMenu::item:disabled {{ color: {token['disabled']}; }}
+QMenu::separator {{
+    height: 1px;
+    margin: 5px 9px;
+    background: {token['border']};
+}}
+"""

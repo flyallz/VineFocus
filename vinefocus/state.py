@@ -183,6 +183,18 @@ class AppState:
         self.save()
         return completed, effective_units, chapter
 
+    def begin_next_growth_chapter(self, chapter_size: int = 24) -> tuple[int, int, int]:
+        """在用户开始下一轮时换株，确保新植株的形态从计时起点就稳定。"""
+        completed, effective_units, chapter = self.growth_state()
+        if completed < chapter_size:
+            return completed, effective_units, chapter
+        chapter += 1
+        self.data["growth_completed_units"] = 0
+        self.data["growth_effective_units"] = 0
+        self.data["growth_chapter"] = chapter
+        self.save()
+        return 0, 0, chapter
+
     @staticmethod
     def growth_stage_name(completed: int, progress_units: int, chapter_size: int = 24) -> str:
         """把内部计数转换成用户可理解的自然生长阶段。"""
