@@ -79,6 +79,7 @@ SCENE_CONFIG = {
 
 UI_THEMES = ("夜色流光", "温室晨雾", "薄荷汽水")
 GROWTH_LAYOUTS = ("静谧单株", "侧边攀援", "环屏生长")
+PERIMETER_GROWTH_MODES = ("四边同步", "等时接力", "自然接力")
 
 VINE_THEMES = {
     "月白花藤": {

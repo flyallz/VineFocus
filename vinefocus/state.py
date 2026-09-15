@@ -26,6 +26,7 @@ class AppState:
             "ui_theme": "夜色流光",
             "vine_theme": "月白花藤",
             "growth_layout": "静谧单株",
+            "perimeter_growth_mode": "四边同步",
             "display_target": "follow",
             "plant_presence": 36,
             "plant_opacity": 40,
@@ -50,6 +51,7 @@ class AppState:
             "growth_chapter": 1,
             "growth_completed_units": 0,
             "growth_effective_units": 0,
+            "growth_target_units": 1,
         }
         self.load()
         self.ensure_records_dir()
@@ -65,6 +67,17 @@ class AppState:
                         self.data["plant_density"] = {
                             "清爽": 20, "标准": 50, "茂盛": 85
                         }.get(str(loaded.get("density", "标准")), 50)
+                    if "growth_target_units" not in loaded:
+                        # 旧版固定使用 24 轮。已有植株先按当前轮数视为完成，
+                        # 下一次开始新株时再采用用户设置的任务轮数，避免升级时
+                        # 把已经长出的桌面植物突然裁回幼苗。
+                        legacy_completed = max(
+                            0, min(24, int(loaded.get("growth_completed_units", 0)))
+                        )
+                        configured_rounds = max(1, min(12, int(loaded.get("rounds", 1))))
+                        self.data["growth_target_units"] = max(
+                            configured_rounds, legacy_completed, 1
+                        )
             except Exception:
                 pass
 
@@ -156,11 +169,20 @@ class AppState:
         self.save_all_records(records)
         self.append_markdown_record(record)
 
+    def growth_target(self) -> int:
+        """返回当前植株冻结的任务轮数；旧版植株最多保留到 24 轮。"""
+        completed = max(0, min(24, int(self.data.get("growth_completed_units", 0))))
+        stored = max(1, min(24, int(self.data.get("growth_target_units", 1))))
+        return max(stored, completed)
+
     def growth_state(self) -> tuple[int, int, int]:
-        """返回当前植株的完成轮次、有进展轮次和植株编号。"""
+        """返回当前植株的完成轮次、目标推进轮次和植株编号。"""
         # 设置文件可以来自旧版本，也可能被用户手动编辑；在读取边界处收紧
         # 不变量，确保看板与覆盖层都不会出现“推进次数大于完成轮次”的假状态。
-        completed = max(0, min(24, int(self.data.get("growth_completed_units", 0))))
+        completed = max(
+            0,
+            min(self.growth_target(), int(self.data.get("growth_completed_units", 0))),
+        )
         effective_units = max(0, min(completed, int(self.data.get("growth_effective_units", 0))))
         chapter = max(1, int(self.data.get("growth_chapter", 1)))
         return (
@@ -169,48 +191,80 @@ class AppState:
             chapter,
         )
 
-    def commit_growth(self, effective: bool, chapter_size: int = 24) -> tuple[int, int, int]:
-        """提交一次正常完成的专注；满章后由下一次提交开启新章节。"""
+    def commit_growth(self, effective: bool, chapter_size: int | None = None) -> tuple[int, int, int]:
+        """提交一轮专注；两种结果都成长，effective 只记录目标推进。"""
         completed, effective_units, chapter = self.growth_state()
-        if completed >= chapter_size:
+        target = self.growth_target()
+        if completed >= target:
             completed, effective_units, chapter = 0, 0, chapter + 1
+            target = max(1, min(12, int(chapter_size or target)))
         completed += 1
         if effective:
             effective_units += 1
         self.data["growth_completed_units"] = completed
         self.data["growth_effective_units"] = effective_units
         self.data["growth_chapter"] = chapter
+        self.data["growth_target_units"] = target
         self.save()
         return completed, effective_units, chapter
 
-    def begin_next_growth_chapter(self, chapter_size: int = 24) -> tuple[int, int, int]:
-        """在用户开始下一轮时换株，确保新植株的形态从计时起点就稳定。"""
+    def begin_next_growth_chapter(
+        self,
+        chapter_size: int = 1,
+        *,
+        replace_incomplete: bool = False,
+    ) -> tuple[int, int, int]:
+        """冻结任务分母；仅在明确切换生长模式时替换未完成植株。"""
+        chapter_size = max(1, min(12, int(chapter_size)))
         completed, effective_units, chapter = self.growth_state()
-        if completed < chapter_size:
+        target = self.growth_target()
+        if completed == 0:
+            if target != chapter_size:
+                self.data["growth_target_units"] = chapter_size
+                self.save()
             return completed, effective_units, chapter
+        if completed < target and not replace_incomplete:
+            return completed, effective_units, chapter
+        if completed < target:
+            # “累计生长”切换到“单轮生长”后，两套分母不能落在同一株上。
+            # 切换只在下一项任务首次开始时执行；已保存记录仍在历史看板中。
+            chapter += 1
+            self.data["growth_completed_units"] = 0
+            self.data["growth_effective_units"] = 0
+            self.data["growth_chapter"] = chapter
+            self.data["growth_target_units"] = chapter_size
+            self.save()
+            return 0, 0, chapter
         chapter += 1
         self.data["growth_completed_units"] = 0
         self.data["growth_effective_units"] = 0
         self.data["growth_chapter"] = chapter
+        self.data["growth_target_units"] = chapter_size
         self.save()
         return 0, 0, chapter
 
     @staticmethod
-    def growth_stage_name(completed: int, progress_units: int, chapter_size: int = 24) -> str:
+    def bloom_progress(completed: int, target: int) -> float:
+        """桌面藤蔓花期：逐轮平滑增加，最后一轮严格达到全部花位。"""
+        target = max(1, int(target))
+        completed = max(0, min(target, int(completed)))
+        if completed >= target:
+            return 1.0
+        return (completed / target) ** 1.15
+
+    @staticmethod
+    def growth_stage_name(completed: int, _progress_units: int, chapter_size: int = 24) -> str:
         """把内部计数转换成用户可理解的自然生长阶段。"""
         completed = max(0, int(completed))
-        progress_units = max(0, int(progress_units))
         ratio = min(1.0, completed / max(1, chapter_size))
-        if completed == 0 or ratio < 0.12:
+        if completed == 0:
             return "萌芽"
         if ratio < 0.34:
-            return "长叶"
-        if progress_units == 0:
-            return "孕蕾"
-        if progress_units <= 2:
-            return "初花"
-        if progress_units <= 5 or ratio < 0.72:
+            return "初绽"
+        if ratio < 0.67:
             return "渐盛"
+        if ratio < 1.0:
+            return "繁花"
         return "盛花"
 
     def session_snapshot_path(self) -> Path:
@@ -257,7 +311,11 @@ class AppState:
     def append_markdown_record(self, record: dict):
         path = self.daily_markdown_path()
         if not path.exists():
-            header = f"# 花藤专注日报｜{date.today()}\n\n> 每轮专注都会生长；目标有推进时，植物会更接近盛花。\n\n---\n\n"
+            header = (
+                f"# 花藤专注日报｜{date.today()}\n\n"
+                "> 每轮专注都会让桌面花藤续长并进入下一花期；“目标有推进”用于复盘标记和完成庆祝。\n\n"
+                "---\n\n"
+            )
             path.write_text(header, encoding="utf-8")
 
         effective = "✅ 目标有推进" if record.get("effective") else "🌿 完成一轮专注"

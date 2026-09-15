@@ -31,7 +31,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .config import GROWTH_LAYOUTS, SCENE_TASKS, UI_THEMES, normalize_theme_name
+from .config import (
+    GROWTH_LAYOUTS,
+    PERIMETER_GROWTH_MODES,
+    SCENE_TASKS,
+    UI_THEMES,
+    normalize_theme_name,
+)
 from .botanical_assets import BotanicalPreview
 from .dialogs import DashboardDialog, FirstRunDialog, OutputDialog
 from .overlay import VineOverlay
@@ -39,7 +45,7 @@ from .platform_integration import foreground_is_exclusive_fullscreen, set_start_
 from .settings_dialog import SettingsDialog
 from .state import AppState
 from .styles import build_app_qss
-from .widgets import MiniButton, Toast
+from .widgets import MiniButton, Toast, WindowControlButton
 
 class PomodoroPanel(QWidget):
     def __init__(self, overlay: VineOverlay):
@@ -57,6 +63,12 @@ class PomodoroPanel(QWidget):
         self.finished = False
         self.awaiting_output = False
         self.demo_mode = False
+        # 一次任务开始后冻结时长和总轮数；设置改动留给下一次任务，避免
+        # 运行中分母或倒计时突然改变。恢复快照时会还原这三个值。
+        self.session_focus_seconds: int | None = None
+        self.session_rest_seconds: int | None = None
+        self.session_total_rounds: int | None = None
+        self.session_cumulative_growth: bool | None = None
         self.always_on_top = True
         self.display_mode = "panel"
         self._quitting = False
@@ -137,12 +149,10 @@ class PomodoroPanel(QWidget):
         brand_subtitle.setObjectName("brandSub")
         brand_column.addWidget(self.title_label)
         brand_column.addWidget(brand_subtitle)
-        self.minimize_btn = QPushButton("—")
-        self.minimize_btn.setObjectName("titleButton")
+        self.minimize_btn = WindowControlButton("minimize")
         self.minimize_btn.setToolTip("最小化")
         self.minimize_btn.clicked.connect(self.showMinimized)
-        self.close_btn = QPushButton("×")
-        self.close_btn.setObjectName("titleButton")
+        self.close_btn = WindowControlButton("close")
         self.close_btn.setToolTip("隐藏到系统托盘")
         self.close_btn.clicked.connect(self.hide_panel_only)
         title_row.addLayout(brand_column)
@@ -295,6 +305,7 @@ class PomodoroPanel(QWidget):
             "theme_combo",
             "ui_theme_combo",
             "growth_layout_combo",
+            "perimeter_growth_combo",
             "display_combo",
             "presence_slider",
             "opacity_slider",
@@ -326,6 +337,7 @@ class PomodoroPanel(QWidget):
         self.theme_combo.currentTextChanged.connect(self.change_theme)
         self.ui_theme_combo.currentTextChanged.connect(self.change_ui_theme)
         self.growth_layout_combo.currentTextChanged.connect(self.change_growth_layout)
+        self.perimeter_growth_combo.currentTextChanged.connect(self.change_perimeter_growth_mode)
         self.display_combo.currentIndexChanged.connect(self.change_display_target)
         self.presence_slider.valueChanged.connect(self.change_plant_presentation)
         self.opacity_slider.valueChanged.connect(self.change_plant_presentation)
@@ -426,11 +438,24 @@ class PomodoroPanel(QWidget):
         if not hasattr(self, "focus_botanical"):
             return
         theme_name = self.theme_combo.currentText() if hasattr(self, "theme_combo") else "月白花藤"
-        # 卡片预览必须忠实反映桌面花藤，不能用最低成熟度掩盖一轮成长。
+        # 管理面板里的装饰植物仍沿用既有“目标推进”花朵口径。本轮新增的
+        # 逐轮花期只作用于桌面覆盖层，不能反向改写面板花朵或密度设置。
         progress = max(0.0, min(1.0, float(self.overlay.progress)))
-        flowers = max(0, int(self.overlay.open_flower_count))
+        _, effective_units, _ = self.state.growth_state()
+        flowers = max(0, int(effective_units))
         self.focus_botanical.set_visual(theme_name, progress, flowers)
         self.growth_botanical.set_visual(theme_name, progress, flowers)
+
+    def sync_desktop_growth_from_state(self, *, animate_bloom: bool = False):
+        """只同步桌面藤蔓：长度按当前植株目标，花期映射到既有花位。"""
+        completed, _, chapter = self.state.growth_state()
+        target = self.state.growth_target()
+        self.overlay.set_growth_chapter(chapter)
+        self.overlay.set_progress(min(1.0, completed / max(1, target)))
+        self.overlay.set_bloom_progress(
+            self.state.bloom_progress(completed, target),
+            animate=animate_bloom,
+        )
 
     def _fit_panel_to_content(self):
         """让主面板高度始终跟随可见内容，避免恢复后留下大块空白。"""
@@ -473,7 +498,8 @@ class PomodoroPanel(QWidget):
         widgets = [
             self.scene_combo, self.task_combo, self.preset_combo, self.focus_spin, self.rest_spin,
             self.rounds_spin, self.density_combo, self.density_slider, self.theme_combo, self.ui_theme_combo,
-            self.growth_layout_combo, self.presence_slider, self.opacity_slider,
+            self.growth_layout_combo, self.perimeter_growth_combo,
+            self.presence_slider, self.opacity_slider,
             self.reduce_motion_check, self.glass_effect_check, self.start_minimized_check,
             self.mini_when_hidden_check, self.notifications_check, self.sound_check,
             self.start_with_system_check, self.skip_final_rest_check, self.close_behavior_combo,
@@ -504,6 +530,10 @@ class PomodoroPanel(QWidget):
         )
         layout_name = self.state.get("growth_layout", "静谧单株")
         self.growth_layout_combo.setCurrentText(layout_name if layout_name in GROWTH_LAYOUTS else "静谧单株")
+        perimeter_mode = self.state.get("perimeter_growth_mode", "四边同步")
+        self.perimeter_growth_combo.setCurrentText(
+            perimeter_mode if perimeter_mode in PERIMETER_GROWTH_MODES else "四边同步"
+        )
         self.presence_slider.setValue(int(self.state.get("plant_presence", 36)))
         self.opacity_slider.setValue(int(self.state.get("plant_opacity", 40)))
         self.reduce_motion_check.setChecked(bool(self.state.get("reduce_motion", False)))
@@ -526,15 +556,14 @@ class PomodoroPanel(QWidget):
         self.overlay.set_density(self.density_slider.value())
         self.overlay.set_theme(self.theme_combo.currentText())
         self.overlay.set_layout(self.growth_layout_combo.currentText())
+        self.overlay.set_perimeter_growth_mode(self.perimeter_growth_combo.currentText())
         self.refresh_display_options()
         self.overlay.set_presentation(
             self.presence_slider.value(),
             self.opacity_slider.value(),
             self.reduce_motion_check.isChecked(),
         )
-        _, effective_units, chapter = self.state.growth_state()
-        self.overlay.set_growth_chapter(chapter)
-        self.overlay.set_open_flower_count(effective_units)
+        self.sync_desktop_growth_from_state()
         self.settings_dialog._sync_choice_cards()
         self.sync_botanical_previews()
         self.apply_ui_theme()
@@ -563,6 +592,7 @@ class PomodoroPanel(QWidget):
         self.state.data["ui_theme"] = self.ui_theme_combo.currentText()
         self.state.data["vine_theme"] = self.theme_combo.currentText()
         self.state.data["growth_layout"] = self.growth_layout_combo.currentText()
+        self.state.data["perimeter_growth_mode"] = self.perimeter_growth_combo.currentText()
         self.state.data["display_target"] = self.display_combo.currentData() or "follow"
         self.state.data["plant_presence"] = self.presence_slider.value()
         self.state.data["plant_opacity"] = self.opacity_slider.value()
@@ -618,6 +648,8 @@ class PomodoroPanel(QWidget):
         self.task_summary_goal.setText(goal or "目标未填写 · 点击编辑补充本轮目标")
 
     def is_cumulative_growth(self) -> bool:
+        if self.session_cumulative_growth is not None:
+            return self.session_cumulative_growth
         return self.cumulative_growth_check.isChecked()
 
     def visual_progress_for_focus(self, phase_progress: float) -> float:
@@ -625,23 +657,25 @@ class PomodoroPanel(QWidget):
         if not self.is_cumulative_growth():
             return phase_progress
         completed, _, _ = self.state.growth_state()
-        base = 0 if completed >= 24 else completed
-        return min(1.0, (base + phase_progress) / 24.0)
+        target = self.state.growth_target()
+        base = 0 if completed >= target else completed
+        return min(1.0, (base + phase_progress) / max(1, target))
 
-    def visual_progress_for_round_end(self, effective: bool) -> float:
+    def visual_progress_for_round_end(self, _effective: bool) -> float:
         if not self.is_cumulative_growth():
-            return 1.0 if effective else 0.70
+            return 1.0
         completed, _, _ = self.state.growth_state()
-        return min(1.0, completed / 24.0)
+        return min(1.0, completed / max(1, self.state.growth_target()))
 
     def refresh_today_label(self):
         growth_mode = "累计" if self.is_cumulative_growth() else "单轮"
         self.today_label.setText(f"今日 {self.state.today_completed()} 次 · {growth_mode}生长")
         if hasattr(self, "growth_summary_label"):
             completed, effective_units, chapter = self.state.growth_state()
-            stage = self.state.growth_stage_name(completed, effective_units)
+            target = self.state.growth_target()
+            stage = self.state.growth_stage_name(completed, effective_units, target)
             self.growth_summary_label.setText(
-                f"第 {chapter} 株 · 成长 {completed}/24 · 当前阶段 {stage} · 目标推进 {effective_units} 次"
+                f"第 {chapter} 株 · 成长 {completed}/{target} · 当前阶段 {stage} · 目标推进 {effective_units} 次"
             )
 
     def refresh_records_dir_label(self):
@@ -927,6 +961,8 @@ class PomodoroPanel(QWidget):
 
     def change_density(self, value: int):
         self.overlay.set_density(value)
+        # 密度只重建可用节点；桌面花期百分比和面板花朵口径各自保持不变。
+        self.sync_botanical_previews()
         self.status_label.setText(
             f"枝叶密度：{self.overlay.density_name} · {self.overlay.density_value}%"
         )
@@ -939,8 +975,14 @@ class PomodoroPanel(QWidget):
 
     def change_growth_layout(self, name: str):
         self.overlay.set_layout(name)
+        self.sync_botanical_previews()
         self.save_current_settings()
         self.status_label.setText(f"生长布局已切换为：{name}")
+
+    def change_perimeter_growth_mode(self, mode: str):
+        self.overlay.set_perimeter_growth_mode(mode)
+        self.save_current_settings()
+        self.status_label.setText(f"环屏节奏：{self.overlay.perimeter_growth_mode}")
 
     def change_plant_presentation(self, *args):
         self.overlay.set_presentation(
@@ -967,13 +1009,48 @@ class PomodoroPanel(QWidget):
         self.save_current_settings()
 
     def get_focus_seconds(self) -> int:
+        if self.session_focus_seconds is not None:
+            return self.session_focus_seconds
         return 30 if self.demo_mode else self.focus_spin.value() * 60
 
     def get_rest_seconds(self) -> int:
+        if self.session_rest_seconds is not None:
+            return self.session_rest_seconds
         return 8 if self.demo_mode else self.rest_spin.value() * 60
 
     def get_total_rounds(self) -> int:
+        if self.session_total_rounds is not None:
+            return self.session_total_rounds
         return 1 if self.demo_mode else self.rounds_spin.value()
+
+    def prepare_session_plan(self):
+        """在任务首次开始时冻结节奏；已完成的半株按原分母继续。"""
+        if (
+            self.session_focus_seconds is not None
+            and self.session_rest_seconds is not None
+            and self.session_total_rounds is not None
+            and self.session_cumulative_growth is not None
+        ):
+            return
+        requested_cumulative = self.cumulative_growth_check.isChecked()
+        self.session_cumulative_growth = requested_cumulative
+        self.session_focus_seconds = 30 if self.demo_mode else self.focus_spin.value() * 60
+        self.session_rest_seconds = 8 if self.demo_mode else self.rest_spin.value() * 60
+        requested_rounds = 1 if self.demo_mode else self.rounds_spin.value()
+        if requested_cumulative and not self.demo_mode:
+            completed, _, _ = self.state.growth_state()
+            target = self.state.growth_target()
+            if 0 < completed < target:
+                # 应用重启或重置后继续同一株，不能让设置滑块改写它的分母。
+                requested_rounds = target
+                self.current_round = max(self.current_round, min(target, completed + 1))
+        self.session_total_rounds = max(1, int(requested_rounds))
+
+    def clear_session_plan(self):
+        self.session_focus_seconds = None
+        self.session_rest_seconds = None
+        self.session_total_rounds = None
+        self.session_cumulative_growth = None
 
     def get_phase_total_seconds(self) -> int:
         return self.get_focus_seconds() if self.phase == "focus" else self.get_rest_seconds()
@@ -992,17 +1069,28 @@ class PomodoroPanel(QWidget):
         if self.finished:
             self.reset(confirm=False)
         if not self.running:
-            if self.phase == "focus" and self.is_cumulative_growth():
-                completed, effective_units, chapter = self.state.growth_state()
-                if completed >= 24:
-                    completed, effective_units, chapter = self.state.begin_next_growth_chapter()
-                    self.overlay.set_growth_chapter(chapter)
-                    self.overlay.set_progress(0.0)
-                    self.overlay.set_open_flower_count(0)
+            if self.phase == "focus":
+                self.prepare_session_plan()
+                if self.is_cumulative_growth():
+                    completed, _, chapter = self.state.begin_next_growth_chapter(
+                        self.get_total_rounds()
+                    )
+                else:
+                    # 单轮生长每轮完成一株；暂停/继续时 completed 仍为 0，
+                    # 因而不会换株，下一轮真正开始前才创建新株。
+                    completed, _, chapter = self.state.begin_next_growth_chapter(
+                        1,
+                        replace_incomplete=True,
+                    )
+                self.overlay.set_growth_chapter(chapter)
+                if self.elapsed_before_pause <= 0.0:
+                    if self.is_cumulative_growth():
+                        self.sync_desktop_growth_from_state()
+                    else:
+                        self.overlay.set_progress(0.0)
+                        self.overlay.set_bloom_progress(0.0)
                     self.refresh_today_label()
                     self.sync_botanical_previews()
-                else:
-                    self.overlay.set_open_flower_count(effective_units)
             self.save_current_settings()
             self.running = True
             self.start_time = time.monotonic()
@@ -1083,6 +1171,7 @@ class PomodoroPanel(QWidget):
         self.timer.stop()
         self.phase = "focus"
         self.current_round = 1
+        self.clear_session_plan()
         self.elapsed_before_pause = 0.0
         self.start_time = None
         self.finished = False
@@ -1091,13 +1180,19 @@ class PomodoroPanel(QWidget):
         self.rest_visual_progress = 0.0 if self.is_cumulative_growth() else 1.0
         self.overlay.set_rest_mode(False)
         if self.is_cumulative_growth():
-            completed, effective_units, chapter = self.state.growth_state()
+            completed, _, chapter = self.state.growth_state()
+            target = self.state.growth_target()
+            if 0 < completed < target:
+                # 已提交的轮次属于永久成长；重置只放弃当前未提交计时，
+                # 再开始时从下一轮接着长，而不是把藤蔓退回第一轮。
+                self.session_total_rounds = target
+                self.current_round = min(target, completed + 1)
             self.overlay.set_growth_chapter(chapter)
-            self.overlay.set_progress(min(1.0, completed / 24.0))
-            self.overlay.set_open_flower_count(effective_units)
+            self.overlay.set_progress(min(1.0, completed / max(1, target)))
+            self.overlay.set_bloom_progress(self.state.bloom_progress(completed, target))
         else:
             self.overlay.set_progress(0.0)
-            self.overlay.set_open_flower_count(0)
+            self.overlay.set_bloom_progress(0.0)
         self.sync_botanical_previews()
         self.status_label.setText("准备开始：选择场景、任务和本轮目标")
         self.start_btn.setText("开始")
@@ -1121,6 +1216,10 @@ class PomodoroPanel(QWidget):
             "awaiting_output": self.awaiting_output,
             "demo_mode": self.demo_mode,
             "last_focus_effective": self.last_focus_effective,
+            "session_focus_seconds": self.get_focus_seconds(),
+            "session_rest_seconds": self.get_rest_seconds(),
+            "session_total_rounds": self.get_total_rounds(),
+            "session_cumulative_growth": self.is_cumulative_growth(),
             "task": {
                 "scene": self.scene_combo.currentText(),
                 "task_type": self.task_combo.currentText(),
@@ -1138,10 +1237,41 @@ class PomodoroPanel(QWidget):
         if phase not in ("focus", "rest"):
             return
         self.phase = phase
-        self.current_round = max(1, min(int(snapshot.get("current_round", 1)), self.get_total_rounds()))
+        self.demo_mode = bool(snapshot.get("demo_mode", False))
+        self.session_cumulative_growth = bool(snapshot.get(
+            "session_cumulative_growth",
+            self.cumulative_growth_check.isChecked(),
+        ))
+        completed, _, _ = self.state.growth_state()
+        target = self.state.growth_target()
+        fallback_rounds = (
+            target
+            if self.is_cumulative_growth() and 0 < completed < target
+            else (1 if self.demo_mode else self.rounds_spin.value())
+        )
+        self.session_focus_seconds = max(
+            1,
+            int(snapshot.get(
+                "session_focus_seconds",
+                30 if self.demo_mode else self.focus_spin.value() * 60,
+            )),
+        )
+        self.session_rest_seconds = max(
+            1,
+            int(snapshot.get(
+                "session_rest_seconds",
+                8 if self.demo_mode else self.rest_spin.value() * 60,
+            )),
+        )
+        self.session_total_rounds = max(
+            1, int(snapshot.get("session_total_rounds", fallback_rounds))
+        )
+        self.current_round = max(
+            1,
+            min(int(snapshot.get("current_round", 1)), self.get_total_rounds()),
+        )
         self.elapsed_before_pause = max(0.0, float(snapshot.get("elapsed", 0.0)))
         self.awaiting_output = bool(snapshot.get("awaiting_output", False))
-        self.demo_mode = bool(snapshot.get("demo_mode", False))
         self.last_focus_effective = bool(snapshot.get("last_focus_effective", True))
         task = snapshot.get("task", {})
         if isinstance(task, dict):
@@ -1174,6 +1304,7 @@ class PomodoroPanel(QWidget):
     def demo(self):
         self.running = False
         self.timer.stop()
+        self.clear_session_plan()
         self.demo_mode = True
         self.phase = "focus"
         self.current_round = 1
@@ -1235,16 +1366,23 @@ class PomodoroPanel(QWidget):
             dialog.result_data = None
             return None
         self.pending_output_dialog = None
-        completed_units, effective_units, chapter = self.state.commit_growth(effective)
+        chapter_size = self.get_total_rounds() if self.is_cumulative_growth() else 1
+        completed_units, _, chapter = self.state.commit_growth(effective, chapter_size)
         self.overlay.set_growth_chapter(chapter)
         self.state.add_completed_focus()
         self.refresh_today_label()
         if self.is_cumulative_growth():
-            self.overlay.set_progress(min(1.0, completed_units / 24.0))
-            self.overlay.set_open_flower_count(effective_units, animate=effective)
+            target = self.state.growth_target()
+            self.overlay.set_progress(min(1.0, completed_units / max(1, target)))
+            # 每一轮诚实完成都会让桌面藤蔓进入下一花期；“目标有推进”
+            # 仅增加庆祝与复盘标记。花期不会增建花位或改变浓密度。
+            self.overlay.set_bloom_progress(
+                self.state.bloom_progress(completed_units, target),
+                animate=True,
+            )
         else:
-            self.overlay.set_progress(1.0 if effective else 0.70)
-            self.overlay.set_open_flower_count(1 if effective else 0, animate=effective)
+            self.overlay.set_progress(1.0)
+            self.overlay.set_bloom_progress(1.0, animate=True)
         self.sync_botanical_previews()
         if effective:
             self.overlay.celebrate()

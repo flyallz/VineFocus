@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .botanical_assets import BotanicalAssets
-from .config import GROWTH_LAYOUTS, UI_THEMES, VINE_THEMES
+from .config import GROWTH_LAYOUTS, PERIMETER_GROWTH_MODES, UI_THEMES, VINE_THEMES
 from .styles import build_app_qss
 
 
@@ -102,7 +102,10 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(12)
 
-        frame, form = self.section("专注节奏", "预设适合快速开始；时长和轮次从下一轮开始生效。")
+        frame, form = self.section(
+            "专注节奏",
+            "预设适合快速开始；任务开始后时长与总轮数会锁定，修改在下一株生效。",
+        )
         self.preset_combo = QComboBox()
         self.preset_combo.addItems(["25+5", "45+10", "60+10", "自定义"])
         self.focus_spin = QSpinBox()
@@ -211,6 +214,21 @@ class SettingsDialog(QDialog):
             layout_row.addWidget(button)
         layout_form.addRow(layout_choices)
 
+        self.perimeter_growth_combo = QComboBox()
+        self.perimeter_growth_combo.addItems(PERIMETER_GROWTH_MODES)
+        self.perimeter_growth_combo.setToolTip(
+            "四边同步会一起生长；等时接力让四段各占四分之一；自然接力按每段实际长度分配"
+        )
+        perimeter_control = QWidget()
+        perimeter_layout = QVBoxLayout(perimeter_control)
+        perimeter_layout.setContentsMargins(0, 0, 0, 0)
+        perimeter_layout.setSpacing(4)
+        perimeter_layout.addWidget(self.perimeter_growth_combo)
+        self.perimeter_growth_hint = QLabel("")
+        self.perimeter_growth_hint.setObjectName("sectionHint")
+        self.perimeter_growth_hint.setWordWrap(True)
+        perimeter_layout.addWidget(self.perimeter_growth_hint)
+
         self.display_combo = QComboBox()
         self.display_combo.addItem("跟随主面板")
         # 保留隐藏组合框作为旧版插件/设置的兼容接口；正式界面使用连续滑动条。
@@ -238,6 +256,7 @@ class SettingsDialog(QDialog):
         density_layout.addWidget(self.density_slider)
         self.density_slider.valueChanged.connect(self._update_density_label)
         layout_form.addRow("显示器", self.display_combo)
+        layout_form.addRow("环屏节奏", perimeter_control)
         layout_form.addRow("枝叶密度", density_control)
         layout.addWidget(layout_frame)
 
@@ -254,6 +273,7 @@ class SettingsDialog(QDialog):
         self.ui_theme_combo.currentTextChanged.connect(self._sync_choice_cards)
         self.theme_combo.currentTextChanged.connect(self._sync_choice_cards)
         self.growth_layout_combo.currentTextChanged.connect(self._sync_choice_cards)
+        self.perimeter_growth_combo.currentTextChanged.connect(self._sync_choice_cards)
         self._sync_choice_cards()
         layout.addStretch()
         scroll.setWidget(content)
@@ -279,6 +299,19 @@ class SettingsDialog(QDialog):
         for group, buttons in self.choice_buttons.items():
             for value, button in buttons.items():
                 button.setChecked(value == selections[group])
+        if hasattr(self, "perimeter_growth_combo"):
+            is_perimeter = self.growth_layout_combo.currentText() == "环屏生长"
+            self.perimeter_growth_combo.setEnabled(is_perimeter)
+            descriptions = {
+                "四边同步": "四个屏幕区域同时舒展，完成时一起抵达终点。",
+                "等时接力": "四个区域依次生长，每个区域使用相同时间。",
+                "自然接力": "四个区域依次生长，较长的藤蔓会分到更多时间。",
+            }
+            self.perimeter_growth_hint.setText(
+                descriptions.get(self.perimeter_growth_combo.currentText(), "")
+                if is_perimeter
+                else "仅在“环屏生长”构图下生效。"
+            )
 
     def build_behavior_tab(self) -> QWidget:
         page = QWidget()

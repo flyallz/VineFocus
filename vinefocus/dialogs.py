@@ -50,7 +50,7 @@ class FirstRunDialog(QDialog):
 
         title = QLabel("让时间在桌面上生长")
         title.setObjectName("dashboardTitle")
-        subtitle = QLabel("先选一株喜欢的植物。每轮专注都会生长，目标有推进时会逐渐开花。")
+        subtitle = QLabel("先选一株喜欢的植物。每轮专注都会续长并开放更多藤上花朵，最后一轮完整盛开。")
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
         root.addWidget(title)
@@ -154,8 +154,8 @@ class OutputDialog(QDialog):
         self.metric_panel.setVisible(False)
         self.metric_toggle.toggled.connect(self.metric_panel.setVisible)
 
-        # 开花是用户对本轮的主观确认，而不是填写表单时的默认奖励；因此这里
-        # 不预选任何结果，避免一次误点就让植物被错误地推进到开花阶段。
+        # 结果是用户对本轮的诚实复盘，不是植物成长的通行证；因此不预选，
+        # 但无论选择哪项，只要保存了完整一轮，桌面藤蔓都会继续生长开花。
         self.outcome_group = QButtonGroup(self)
         self.outcome_group.setExclusive(True)
         self.progress_choice = QPushButton("本轮目标有推进")
@@ -171,7 +171,10 @@ class OutputDialog(QDialog):
         outcome_row.setSpacing(8)
         outcome_row.addWidget(self.progress_choice)
         outcome_row.addWidget(self.focus_choice)
-        progress_hint = QLabel("请选择最符合这轮的结果：两种都会保存记录并让枝叶生长；只有“有推进”会促进开花。")
+        progress_hint = QLabel(
+            "请选择最符合这轮的结果：两种都会保存记录，并让桌面藤蔓续长、开放更多花；"
+            "“目标有推进”只会额外触发完成庆祝，并作为复盘标记。"
+        )
         progress_hint.setObjectName("muted")
         progress_hint.setWordWrap(True)
 
@@ -229,7 +232,7 @@ class OutputDialog(QDialog):
         """)
 
     def _update_outcome_choice(self, _button):
-        """用户明确选择后才允许提交，防止无意间推进开花阶段。"""
+        """用户明确选择后才允许提交，避免生成不准确的复盘标记。"""
         self.save_btn.setEnabled(self.outcome_group.checkedButton() is not None)
 
     def save_output(self):
@@ -369,9 +372,10 @@ class DashboardDialog(QDialog):
 
     def current_plant_state(self):
         completed, progress_units, chapter = self.state.growth_state()
-        progress = max(self.current_progress, min(1.0, completed / 24.0))
-        stage = self.state.growth_stage_name(completed, progress_units)
-        return completed, progress_units, chapter, progress, stage
+        target = self.state.growth_target()
+        progress = max(self.current_progress, min(1.0, completed / max(1, target)))
+        stage = self.state.growth_stage_name(completed, progress_units, target)
+        return completed, progress_units, chapter, target, progress, stage
 
     def build_report_text(self):
         records = self.records_for_range(self.current_range)
@@ -390,8 +394,8 @@ class DashboardDialog(QDialog):
         lines.append(f"完成专注：{len(records)} 次")
         lines.append(f"目标有推进：{len(effective)} 次")
         lines.append(f"总专注时长：{total_minutes} 分钟")
-        completed, progress_units, chapter, plant_progress, stage = self.current_plant_state()
-        lines.append(f"当前植物：第 {chapter} 株 · 成长 {completed}/24 · {stage}")
+        completed, progress_units, chapter, target, plant_progress, stage = self.current_plant_state()
+        lines.append(f"当前植物：第 {chapter} 株 · 成长 {completed}/{target} · {stage}")
         lines.append(f"当前花藤进度：{int(plant_progress * 100)}%")
         lines.append(f"连续专注：{self.continuous_streak()} 天")
         lines.append(f"记录目录：{self.state.get_records_dir()}")
@@ -570,7 +574,7 @@ class DashboardDialog(QDialog):
         trend_days = self.current_trend_days()
         trend = self.trend_counts(trend_days)
         streak = self.continuous_streak()
-        completed, progress_units, chapter, plant_progress, stage = self.current_plant_state()
+        completed, progress_units, chapter, target, plant_progress, stage = self.current_plant_state()
 
         self.theme_name = normalize_theme_name(self.state.get("vine_theme", self.theme_name))
         content = QWidget()
@@ -598,12 +602,14 @@ class DashboardDialog(QDialog):
         hero_row = QHBoxLayout()
         plant_preview = BotanicalPreview(self.theme_name)
         plant_preview.setMinimumSize(190, 220)
+        # 看板装饰植物的花朵继续使用既有“目标推进”次数；桌面藤蔓的
+        # 逐轮花期不在这里复用，避免两个功能被误认为同一套规则。
         plant_preview.set_visual(self.theme_name, plant_progress, progress_units)
         ring = GrowthRing(int(plant_progress * 100))
         hero_row.addWidget(plant_preview, stretch=1)
         hero_row.addWidget(ring, alignment=Qt.AlignmentFlag.AlignTop)
         plant_layout.addLayout(hero_row, stretch=1)
-        plant_note = QLabel(f"成长 {completed}/24 · 当前阶段 {stage} · 本株目标推进 {progress_units} 次")
+        plant_note = QLabel(f"成长 {completed}/{target} · 当前阶段 {stage} · 本株目标推进 {progress_units} 次")
         plant_note.setObjectName("status")
         plant_layout.addWidget(plant_note)
         overview.addWidget(plant_card, stretch=4)
@@ -613,7 +619,7 @@ class DashboardDialog(QDialog):
         stats.addWidget(make_card("◉  专注轮次", f"{len(records)} 次", f"{self.current_range}完成"), 0, 0)
         stats.addWidget(make_card("◷  专注时长", f"{total_minutes} 分钟", f"{self.current_range}累计"), 0, 1)
         stats.addWidget(make_card("♧  连续专注", f"{streak} 天", "再接再厉"), 1, 0)
-        stats.addWidget(make_card("▤  目标有推进", f"{len(effective)} 次", "记录成果并推动开花"), 1, 1)
+        stats.addWidget(make_card("▤  目标有推进", f"{len(effective)} 次", "用于复盘标记"), 1, 1)
         overview.addLayout(stats, stretch=6)
         root.addLayout(overview)
 
@@ -657,7 +663,7 @@ class DashboardDialog(QDialog):
         card_grid.setSpacing(10)
         display_records = list(reversed(records[-6:]))
         if not display_records:
-            card_grid.addWidget(make_card("等待第一次生长", "完成一次专注后会出现记录卡片", "每轮都会生长；目标有推进时会逐渐开花。"), 0, 0, 1, 3)
+            card_grid.addWidget(make_card("等待第一次生长", "完成一次专注后会出现记录卡片", "每轮都会续长并开放更多藤上花朵。"), 0, 0, 1, 3)
         else:
             for index, record in enumerate(display_records):
                 mark = "目标有推进" if record.get("effective") else "完成一轮专注"

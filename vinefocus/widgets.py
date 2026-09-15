@@ -74,6 +74,44 @@ def make_card(title: str, value: str, subtitle: str = "") -> QFrame:
     return frame
 
 
+class WindowControlButton(QPushButton):
+    """用相同画布和线宽绘制标题栏按钮，避免字体符号大小、基线不一致。"""
+
+    def __init__(self, kind: str, parent=None):
+        super().__init__("", parent)
+        self.kind = "close" if kind == "close" else "minimize"
+        self.setObjectName("titleButton")
+        self.setProperty("controlKind", self.kind)
+        self.setFixedSize(34, 30)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAccessibleName("关闭" if self.kind == "close" else "最小化")
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(self.palette().buttonText().color(), 1.55)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        center = self.rect().center()
+        half = 5.2
+        if self.kind == "close":
+            painter.drawLine(
+                QPointF(center.x() - half, center.y() - half),
+                QPointF(center.x() + half, center.y() + half),
+            )
+            painter.drawLine(
+                QPointF(center.x() + half, center.y() - half),
+                QPointF(center.x() - half, center.y() + half),
+            )
+        else:
+            painter.drawLine(
+                QPointF(center.x() - half, center.y() + 1.5),
+                QPointF(center.x() + half, center.y() + 1.5),
+            )
+
+
 class GrowthRing(QWidget):
     """成长看板中的环形生长进度，保持无第三方图表依赖。"""
 

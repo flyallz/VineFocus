@@ -18,7 +18,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("VineFocus")
     app.setOrganizationName("VineFocus")
-    app.setApplicationVersion("1.7.3")
+    app.setApplicationVersion("1.7.4")
     app.setQuitOnLastWindowClosed(False)
     configure_platform_app()
 
